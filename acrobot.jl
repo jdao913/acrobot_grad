@@ -1,4 +1,6 @@
 using Plots
+using ControlSystems
+using LinearAlgebra
 
 # Global vars
 r = 1
@@ -7,6 +9,7 @@ eps = 1e-3
 damping = 0.1
 gravity = 9.8
 dt = 0.01
+xinit = zeros(4,1)+ones(4)*.01#0.01*randn(4,1)
 
 function rk4(state, u)
     massPos = state[1:2]
@@ -59,8 +62,15 @@ function xdot(x, u)
     return xdot
 end
 
+function xdotlin(x, u)
+    A = hcat([0, 0, 1, 0], [0, 0, 0, 1], [gravity, -gravity, 0, 0], [-gravity, 3*gravity, 0, 0])
+    A = transpose(A)
+    B = [0, 0, -2, 5]
+    return A*x + B*u
+end
+
 function lambdadot(lambda, x, u)
-    return lx(x, u) + transpose(finiteDiff(x, u, "x")) * lambda
+    return true_lx(x, u) + transpose(finiteDiff(x, u, "x")) * lambda
 end
 
 function finiteDiff(x, u, diffvar)
@@ -72,14 +82,14 @@ function finiteDiff(x, u, diffvar)
             step[i] = eps
             leftX = rk4(x - step, u)
             rightX = rk4(x + step, u)
-            diff[:, i] = (rightX - leftX) / eps
+            diff[:, i] = (rightX - leftX) / 2*eps
         end
         return diff
     elseif diffvar == "u"
         step = 1e-3
         leftU = rk4(x, u - eps)
         rightU = rk4(x, u + eps)
-        return (rightU - leftU) / eps
+        return (rightU - leftU) / 2*eps
     else
         print("Error, invalid differentiation variable")
         return 0
@@ -121,16 +131,33 @@ function lx(x, u)
     return 1/2*k^2*[2*x[1], 2*x[2], 0, 0] + k*[1, 1, 0, 0]
 end
 
+function true_lx(x, u)
+    k = 2
+    estuff = exp(k*cos(x[1]) + k*cos(x[2]) - 2*k)
+    return [-k*sin(x[1])*estuff, -k*sin(x[2])*estuff, 0, 0]
+end
+
 function cost(x, u)
     r = 1
     k = 2
     return r/2*u^2 + 1/2*k^2*(x[1]^2+x[2]^2)+k*(x[1]+x[2]) + 1
 end
 
+function true_cost(x, u)
+    r = 1
+    k = 2
+    return r/2*u^2+1-exp(k*cos(x[1])+k*cos(x[2])-2*k)
+end
+
+function cost_func(u)
+    pos = forward(xinit, u)
+    return total_cost(pos, u)
+end
+
 function total_cost(pos, u)
     total_cost = 0
     for j = 1:length(u)
-        total_cost = cost(pos[:, j], u[j])
+        total_cost = true_cost(pos[:, j], u[j])
     end
     return total_cost
 end
@@ -142,6 +169,7 @@ function getlambdas(x, u)
         costdiff = lx(x[:, i-1], u[i-1])
         statediff = finiteDiff(x[:, i-1], u[i-1], "x")
         next = costdiff + transpose(finiteDiff(x[:, i-1], u[i-1], "x")) * lambdas[:, i]
+        println(next)
         lambdas[:, i-1] = next #costdiff + transpose(finiteDiff(x[:, i-1], u[i-1], "x")) * lambdas[:, i]
     end
     return lambdas
@@ -152,6 +180,7 @@ function getgrads(x, u)
     grads = zeros(T)
     # lambdas = getlambdas(x, u)
     lambdas = zeros(4, T+1)
+    lambdas[:, T+1] = true_lx(x[:, T+1], 0)
     for i = T:-1:1
         lambdas[:, i] = int_lambda(lambdas[:, i+1], x[:, i], u[i])
     end
@@ -161,45 +190,128 @@ function getgrads(x, u)
     return grads
 end
 
+function uGrad!(G, u)
+    x = forward(xinit, u)
+    lambdas = zeros(4, T+1)
+    lambdas[:, T+1] = lx(x[:, T+1], 0)
+    for i = T:-1:1
+        lambdas[:, i] = int_lambda(lambdas[:, i+1], x[:, i], u[i])
+    end
+    for i in 1:T
+        G[i] = lu(x[:, i], u[i]) + transpose(finiteDiff(x[:, i], u[i], "u")) * lambdas[:, i+1]
+    end
+end
+
+
+function step_search(x, u, curr_cost, grad, step)
+    newu = u + step*grad
+    rollout = forward(x, newu)
+    roll_cost = total_cost(rollout, newu)
+    step_incr = step/10
+    curr_step = step
+    while roll_cost > curr_cost
+        curr_step -= step_incr
+        newu = u + curr_step*grad
+        rollout = forward(x, newu)
+        roll_cost = total_cost(rollout, newu)
+    end
+    return newu
+end
+
 function trajopt(xinit, uinit, T, niter, max_step)
     u = copy(uinit)
+    costs = zeros(niter)
     min_step = 1e-4
     for i = 1:niter
         curr_step = max_step
+        # if i > 180
+        #     curr_step = 1e-5
+        # end
         pos = forward(xinit, u)
         curr_cost = total_cost(pos, u)
+        costs[i] = curr_cost
         println("Iteration: "*string(i)*"\tTotal Cost: "*string(curr_cost))
         grads = getgrads(pos, u)
         # Adaptive step size:
+        # newu = step_search(xinit, u, curr_cost, grads, curr_step)
+        # while newu == u
+        #     curr_step = curr_step * .1
+        #     newu = step_search(xinit, u, curr_cost, grads, curr_step)
+        # end
+        # println(curr_step)
         newu = u + curr_step*grads
-        rollout = forward(xinit, newu)
-        roll_cost = total_cost(rollout, newu)
-        while roll_cost > curr_cost
-            curr_step -= 1e-4
-            newu = u + curr_step*grads
-            rollout = forward(xinit, newu)
-            roll_cost = total_cost(rollout, newu)
-        end
+        # rollout = forward(xinit, newu)
+        # roll_cost = total_cost(rollout, newu)
+        # while (roll_cost > curr_cost)# && curr_step > 1e-6)
+        #     curr_step = curr_step / 2
+        #     newu = u + curr_step*grads
+        #     rollout = forward(xinit, newu)
+        #     roll_cost = total_cost(rollout, newu)
+        # end
+        # println(curr_step)
         u = newu
     end
-    return u
+    return u, costs
 end
 
-# TODO: Clamp controls. properly wrap angles, not just subtract pi in case wraps around more than once in a time step (but shouldn't happe
+function accel_trajopt(xinit, niter, max_step)
+    prev_a = 1
+    curr_a = .5*(1+sqrt(4+1))
+    # prev_u = zeros(Int(T/dt))
+    curr_u = zeros(Int(T/dt))
+    curr_y = zeros(Int(T/dt))
+    costs = zeros(niter)
+    for i = 1:niter
+        curr_traj = forward(xinit, curr_u)
+        curr_cost = total_cost(curr_traj, curr_u)
+        costs[i] = curr_cost
+        println("Iteration: "*string(i)*"\tTotal Cost: "*string(curr_cost))
+        next_a = .5*(1+sqrt(4*curr_a^2+1))
+        t = (1-curr_a) / next_a
+        # pos = forward(xinit, y)
+        grads = getgrads(curr_traj, curr_u)
+        next_y = curr_u + max_step*grads
+        new_u = (1-t)*next_y + t*curr_y
+        
+        # new_u = y + max_step*grads
+        curr_a = next_a
+        # prev_u = curr_u
+        curr_u = new_u
+    end
+    return curr_u, costs
+end
+
+# TODO: Clamp controls. properly wrap angles, not just subtract pi in case wraps around more than once in a time step (but shouldn't happen
 # if limit controls)
 # BISECTION line search for grad step!!
 
 
 gr()
 println("start")
-T = 5
-step = 1e-3
-niter = 500
-xinit = zeros(4,1)+0.05*randn(4,1)
+T = 3
+step = 1e0
+niter = 300
+
+# A = hcat([0, 0, 1, 0], [0, 0, 0, 1], [gravity, -gravity, 0, 0], [-gravity, 3*gravity, 0, 0])
+# A = transpose(A)
+# println(size(A))
+# B = [0, 0, -2, 5]
+# Q = Matrix{Float64}(I, 4, 4)
+# R = Matrix{Float64}(I, 4, 4)
+# println(transpose(B)*R*B)
+# X = ControlSystems.care(A, B, Q, R)
+# G = transpose(B)*X
+# println(G)
 uinit = zeros(Int(T/dt))
-@time u = trajopt(xinit, uinit, T, niter, step)
-# u = zeros(Int(T/dt))
-pos = forward(xinit, u)
+# optimize(cost_func, uGrad!, uinit)
+@time u, costs = trajopt(xinit, uinit, T, niter, step)
+# @time u, costs = accel_trajopt(xinit, niter, step)
+
+plot(costs)
+savefig("truecost.png")
+
+u = zeros(Int(T/dt))
+pos = forward(xinit, -29*ones(Int(T/dt)))
 # total_cost = 0
 # for j = 1:length(u)
 #     total_cost = cost(pos[:, j], u[j])
