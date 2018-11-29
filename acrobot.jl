@@ -1,15 +1,17 @@
 using Plots
-using ControlSystems
+# using ControlSystems
 using LinearAlgebra
 
 # Global vars
 r = 1
 k = 2
-eps = 1e-3
+eps = 1e-6
 damping = 0.1
 gravity = 9.8
 dt = 0.01
-xinit = zeros(4,1)+ones(4)*.01#0.01*randn(4,1)
+# xinit = zeros(4,1)+ones(4)*.01#0.01*randn(4,1)
+xinit = [-0.0534, -0.0405, -0.1472, 0.0719]
+
 
 function rk4(state, u)
     massPos = state[1:2]
@@ -97,14 +99,16 @@ function finiteDiff(x, u, diffvar)
 end
 
 function wrapstate!(state)
-    if state[1] > pi
+    while state[1] > pi
         state[1] -= 2*pi
-    elseif state[1] < -pi
+    end
+    while state[1] < -pi
         state[1] += 2*pi
     end
-    if state[2] > pi
+    while state[2] > pi
         state[2] -= 2*pi
-    elseif state[2] < -pi
+    end
+    while state[2] < -pi
         state[2] += 2*pi
     end
 end
@@ -113,7 +117,9 @@ function forward(xinit, u)
     T = length(u) + 1
     pos = zeros(4, T)
     pos[:,1] = xinit
+    G = [421.7063, 140.6532, 173.1010, 65.7230]
     for i = 2:T
+        uLQR = transpose(G)*pos[:, i-1]
         next = rk4(pos[:, i-1], u[i-1])
         wrapstate!(next)
         pos[:, i] = next
@@ -163,13 +169,12 @@ function total_cost(pos, u)
 end
 
 function getlambdas(x, u)
-    T = length(u) + 1
-    lambdas = zeros(4, T)
+    T = length(u)
+    lambdas = zeros(4, T+1)
+    lambdas[:, T+1] = true_lx(x[:, T+1], 0)
     for i in T:-1:2
-        costdiff = lx(x[:, i-1], u[i-1])
-        statediff = finiteDiff(x[:, i-1], u[i-1], "x")
-        next = costdiff + transpose(finiteDiff(x[:, i-1], u[i-1], "x")) * lambdas[:, i]
-        println(next)
+        costdiff = true_lx(x[:, i], u[i])
+        next = costdiff + transpose(finiteDiff(x[:, i], u[i], "x")) * lambdas[:, i+1]
         lambdas[:, i-1] = next #costdiff + transpose(finiteDiff(x[:, i-1], u[i-1], "x")) * lambdas[:, i]
     end
     return lambdas
@@ -178,14 +183,17 @@ end
 function getgrads(x, u)
     T = length(u)
     grads = zeros(T)
-    # lambdas = getlambdas(x, u)
-    lambdas = zeros(4, T+1)
-    lambdas[:, T+1] = true_lx(x[:, T+1], 0)
-    for i = T:-1:1
-        lambdas[:, i] = int_lambda(lambdas[:, i+1], x[:, i], u[i])
-    end
+    lambdas = getlambdas(x, u)
+    # lambdas = zeros(4, T+1)
+    # lambdas[:, T+1] = true_lx(x[:, T+1], 0)
+    # lambdas[:, T] = int_lambda(lambdas[:, T+1], x[:, T+1], 0)
+    # for i = T-1:-1:1
+        # lambdas[:, i] = int_lambda(lambdas[:, i+1], x[:, i+1], u[i+1])
+    # end
     for i in 1:T
-        grads[i] = lu(x[:, i], u[i]) + transpose(finiteDiff(x[:, i], u[i], "u")) * lambdas[:, i+1]
+        fxlambda = transpose(finiteDiff(x[:, i], u[i], "u")) * lambdas[:, i+1]
+        # print(fxlambda)
+        grads[i] = lu(x[:, i], u[i]) + fxlambda
     end
     return grads
 end
@@ -232,6 +240,7 @@ function trajopt(xinit, uinit, T, niter, max_step)
         costs[i] = curr_cost
         println("Iteration: "*string(i)*"\tTotal Cost: "*string(curr_cost))
         grads = getgrads(pos, u)
+        println("Grads: ", LinearAlgebra.norm(grads))
         # Adaptive step size:
         # newu = step_search(xinit, u, curr_cost, grads, curr_step)
         # while newu == u
@@ -239,7 +248,7 @@ function trajopt(xinit, uinit, T, niter, max_step)
         #     newu = step_search(xinit, u, curr_cost, grads, curr_step)
         # end
         # println(curr_step)
-        newu = u + curr_step*grads
+        newu = u - curr_step*grads
         # rollout = forward(xinit, newu)
         # roll_cost = total_cost(rollout, newu)
         # while (roll_cost > curr_cost)# && curr_step > 1e-6)
@@ -288,9 +297,9 @@ end
 
 gr()
 println("start")
-T = 3
+T = 5
 step = 1e0
-niter = 300
+niter = 100
 
 # A = hcat([0, 0, 1, 0], [0, 0, 0, 1], [gravity, -gravity, 0, 0], [-gravity, 3*gravity, 0, 0])
 # A = transpose(A)
@@ -310,8 +319,8 @@ uinit = zeros(Int(T/dt))
 plot(costs)
 savefig("truecost.png")
 
-u = zeros(Int(T/dt))
-pos = forward(xinit, -29*ones(Int(T/dt)))
+# u = zeros(Int(T/dt))
+pos = forward(xinit, u)
 # total_cost = 0
 # for j = 1:length(u)
 #     total_cost = cost(pos[:, j], u[j])
@@ -322,4 +331,4 @@ anim = @animate for i = 1:3:Int(T/dt) # Only plot every third frame
     plot([0, coord[1], coord[3]], [0, coord[2], coord[4]], xlim=(-2, 2), ylim=(-2,2))
     # frame(anim)
 end
-gif(anim, "./testreg.gif")
+gif(anim, "./testopt.gif")
