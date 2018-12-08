@@ -10,6 +10,8 @@ r = .001
 k = 2
 eps = 1e-8
 
+# Finite difference to get gradients of dynamics with respect
+# to either states or controls
 function finiteDiff(x, u, diffvar)
     global eps
     if diffvar == "x"   # Diff wrt to x
@@ -32,19 +34,23 @@ function finiteDiff(x, u, diffvar)
     end
 end
 
+# Derivative of cost w.r.t. to control
 function lu(x, u)
     return r*u
 end
 
+# Derivative of cost w.r.t to state
 function true_lx(x, u)
     estuff = exp(k*cos(x[1]) + k*cos(x[2]) - 2*k)
     return [-k*sin(x[1])*estuff, -k*sin(x[2])*estuff, 0, 0]
 end
 
+# Cost function
 function true_cost(x, u)
     return r/2*u^2+1-exp(k*cos(x[1])+k*cos(x[2])-2*k)
 end
 
+# Compute total cost of a trajectory
 function total_cost(pos, u)
     total_cost = 0
     for j = 1:length(u)
@@ -53,6 +59,7 @@ function total_cost(pos, u)
     return total_cost
 end
 
+# Get lambdas to compute gradient
 function getlambdas(x, u)
     T = length(u)
     lambdas = zeros(4, T+1)
@@ -65,6 +72,7 @@ function getlambdas(x, u)
     return lambdas
 end
 
+# Compute gradient of total cost w.r.t to controls
 function getgrads(x, u)
     T = length(u)
     grads = zeros(T)
@@ -76,6 +84,8 @@ function getgrads(x, u)
     return grads
 end
 
+# Optimize a trajectory given an initial state and initial guess at optimal
+# control sequence.
 function trajopt(xinit, uinit, T, niter, max_step)
     u = copy(uinit)
     costs = zeros(0)
@@ -137,10 +147,13 @@ uinit = zeros(Int(T/dt))
 # end
 # println("Final cost: ", finalc)
 
+plot(costs, xlabel="Iteration", ylabel="Cost", title="Cost Curve of Gradient Descent with Adaptive Step Size")
+savefig("adaptstep.png")
+
 pos = forward(xinit, u)
 println("animating")
 anim = @animate for i = 1:3:Int(T/dt) # Only plot every third frame
     coord = cartcoord(pos[:, i])
     plot([0, coord[1], coord[3]], [0, coord[2], coord[4]], xlim=(-2, 2), ylim=(-2,2))
 end
-gif(anim, "./graddescent.gif")
+gif(anim, "./adapt.gif")
